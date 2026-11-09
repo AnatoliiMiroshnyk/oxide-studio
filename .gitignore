@@ -1,0 +1,12 @@
+/target/
+.DS_Store
+Thumbs.db
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
