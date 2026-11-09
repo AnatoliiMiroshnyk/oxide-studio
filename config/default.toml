@@ -1,0 +1,18 @@
+[application]
+name = "Oxide Studio"
+
+[database]
+# Result rows returned by the SQL workbench in one execution.
+max_query_rows = 1000
+# Rows loaded into the table browser per page.
+table_page_size = 200
+busy_timeout_ms = 5000
+foreign_keys = true
+
+[editor]
+font_size = 14
+show_line_numbers = true
+
+[appearance]
+theme = "dark"
+accent = "teal"
