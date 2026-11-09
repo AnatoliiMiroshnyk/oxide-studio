@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Oxide Studio mark</title>
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8cebd7"/>
+      <stop offset="1" stop-color="#268f89"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="5" width="118" height="118" rx="29" fill="#0f1722"/>
+  <path d="M64 18 108 43v42L64 110 20 85V43z" fill="none" stroke="url(#shell)" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M42 81V47l44 34V47" fill="none" stroke="#d7fff5" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="64" cy="64" r="5" fill="#8cebd7"/>
+</svg>
