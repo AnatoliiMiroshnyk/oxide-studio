@@ -46,3 +46,5 @@ The project follows a lightweight Keep a Changelog structure and Semantic Versio
 - Initial prototype release.
 - Some advanced SQLiteStudio features are planned
   for future versions.
+
+## [0.2.0]
