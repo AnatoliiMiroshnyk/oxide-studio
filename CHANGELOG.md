@@ -15,16 +15,34 @@ The project follows a lightweight Keep a Changelog structure and Semantic Versio
 - Updated SQLite column-name collection to consume the iterator returned by `rusqlite` directly.
 - Updated egui styling to use the per-theme `style_mut_of` API and explicitly select the dark theme, compatible with egui 0.37.
 
-## [0.1.0] - 2026-11-07
+## [0.1.0] - 2026-11-09
 
 ### Added
+- Initial native Rust desktop application.
+- SQLite database connection management.
+- Database creation and opening.
+- Read-only database mode.
+- Database schema explorer.
+- Tables, views, indexes and triggers inspection.
+- Table and view data browser.
+- SQL workbench.
+- SQL query execution.
+- Query result grid.
+- Session-based SQL history.
+- CSV export.
+- SQLite integrity checking.
+- Dark desktop interface.
 
-- Native Rust desktop shell using eframe/egui.
-- SQLite database opening, creation, read-only mode, and in-memory demo workspace.
-- Schema explorer for tables, views, indexes, and triggers.
-- Paginated table data browser and schema inspector.
-- Single-statement SQL workbench with bounded results and execution timing.
-- Session query history, CSV export, and SQLite integrity check.
-- Unit tests for schema reads, query execution and row limits, display-value truncation, read-only behavior, and CSV output.
-- Product requirements, architecture, UX, roadmap, user, development, security, test, release, build-validation, and contribution documentation.
-- GitHub Actions workflow for formatting, Clippy, tests, and cross-platform builds.
+### Documentation
+- Added architecture documentation.
+- Added product requirements.
+- Added security model.
+- Added development guide.
+- Added user guide.
+- Added feature roadmap.
+- Added contribution guidelines.
+
+### Notes
+- Initial prototype release.
+- Some advanced SQLiteStudio features are planned
+  for future versions.
