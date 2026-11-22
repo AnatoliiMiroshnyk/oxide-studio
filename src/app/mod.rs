@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 
+use anyhow::{anyhow, Result};
+use rusqlite::types::Value;
 use eframe::egui::{self, Align, Color32, Layout, RichText, ScrollArea, TextEdit};
 use rfd::FileDialog;
 
 use crate::{
-    db::{ColumnInfo, DatabaseManager, DbObject, QueryResult, TableData},
+    db::{ColumnInfo, ColumnSpec, DatabaseManager, DbObject, QueryResult, RowIdentity, SqlValue, TableData, TransactionMode},
     ui::apply_theme,
 };
 
@@ -17,6 +19,54 @@ enum WorkspaceTab {
     Query,
     Structure,
     History,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowEditorMode { Insert, Update }
+
+#[derive(Debug, Clone)]
+struct RowField {
+    name: String,
+    data_type: String,
+    text: String,
+    initial_text: String,
+    is_null: bool,
+    initial_is_null: bool,
+    include: bool,
+    editable: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RowEditorState {
+    mode: RowEditorMode,
+    table: String,
+    fields: Vec<RowField>,
+    identity: Option<RowIdentity>,
+}
+
+#[derive(Debug, Clone)]
+struct ColumnDraft {
+    name: String,
+    data_type: String,
+    not_null: bool,
+    primary_key: bool,
+}
+
+#[derive(Debug, Clone)]
+enum DestructiveAction {
+    DeleteRow { table: String, identity: RowIdentity },
+    DropTable { table: String },
+    DropColumn { table: String, column: String },
+    RollbackTransaction,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDestructive {
+    action: DestructiveAction,
+    title: String,
+    warning: String,
+    confirm_token: String,
+    typed_confirmation: String,
 }
 
 pub struct OxideApp {
@@ -32,6 +82,21 @@ pub struct OxideApp {
     table_columns: Vec<ColumnInfo>,
     table_offset: usize,
     table_has_next: bool,
+    selected_row_index: Option<usize>,
+    row_editor: Option<RowEditorState>,
+    pending_destructive: Option<PendingDestructive>,
+    show_create_table: bool,
+    create_table_name: String,
+    create_table_columns: Vec<ColumnDraft>,
+    schema_new_column_name: String,
+    schema_new_column_type: String,
+    schema_new_column_not_null: bool,
+    schema_default_value: String,
+    schema_default_enabled: bool,
+    schema_selected_column: String,
+    schema_rename_table_value: String,
+    schema_rename_column_value: String,
+    transaction_mode: TransactionMode,
     query_history: Vec<String>,
     last_error: Option<String>,
     status_message: String,
@@ -55,6 +120,24 @@ impl OxideApp {
             table_columns: Vec::new(),
             table_offset: 0,
             table_has_next: false,
+            selected_row_index: None,
+            row_editor: None,
+            pending_destructive: None,
+            show_create_table: false,
+            create_table_name: String::new(),
+            create_table_columns: vec![
+                ColumnDraft { name: "id".into(), data_type: "INTEGER".into(), not_null: true, primary_key: true },
+                ColumnDraft { name: "name".into(), data_type: "TEXT".into(), not_null: false, primary_key: false },
+            ],
+            schema_new_column_name: String::new(),
+            schema_new_column_type: "TEXT".into(),
+            schema_new_column_not_null: false,
+            schema_default_value: String::new(),
+            schema_default_enabled: false,
+            schema_selected_column: String::new(),
+            schema_rename_table_value: String::new(),
+            schema_rename_column_value: String::new(),
+            transaction_mode: TransactionMode::Immediate,
             query_history: Vec::new(),
             last_error: None,
             status_message: "Ready · open a database to begin".to_owned(),
@@ -86,6 +169,10 @@ impl OxideApp {
     }
 
     fn open_database(&mut self, path: PathBuf, read_only: bool) {
+        if self.database.is_in_transaction() {
+            self.set_error("Commit or roll back the active transaction before opening another database");
+            return;
+        }
         match self.database.open(&path, read_only) {
             Ok(()) => {
                 self.last_error = None;
@@ -96,6 +183,9 @@ impl OxideApp {
                 );
                 self.selected_table = None;
                 self.selected_object = None;
+                self.selected_row_index = None;
+                self.row_editor = None;
+                self.pending_destructive = None;
                 self.table_offset = 0;
                 self.refresh_database();
                 self.active_tab = if self.selected_table.is_some() {
@@ -109,12 +199,19 @@ impl OxideApp {
     }
 
     fn start_demo(&mut self) {
+        if self.database.is_in_transaction() {
+            self.set_error("Commit or roll back the active transaction before switching databases");
+            return;
+        }
         match self.database.open_demo() {
             Ok(()) => {
                 self.status_message = "Demo workspace connected · in-memory database".to_owned();
                 self.last_error = None;
                 self.selected_table = None;
                 self.selected_object = None;
+                self.selected_row_index = None;
+                self.row_editor = None;
+                self.pending_destructive = None;
                 self.table_offset = 0;
                 self.refresh_database();
                 self.select_named_object("customers");
@@ -140,11 +237,15 @@ impl OxideApp {
             self.selected_table = None;
             self.selected_object = None;
         }
-        if self.selected_table.is_none()
-            && let Some(object) = self.objects.iter().find(|object| object.kind == "table")
-        {
-            self.selected_table = Some(object.name.clone());
-            self.selected_object = Some(object.clone());
+        if self.selected_table.is_none() {
+            if let Some(object) = self.objects.iter().find(|object| object.kind == "table") {
+                self.selected_table = Some(object.name.clone());
+                self.selected_object = Some(object.clone());
+            }
+        } else if let Some(name) = self.selected_table.as_ref() {
+            self.selected_object = self.objects.iter()
+                .find(|object| object.name == *name && (object.kind == "table" || object.kind == "view"))
+                .cloned();
         }
         if let Some(table) = self.selected_table.clone() {
             self.load_table(&table);
@@ -162,6 +263,7 @@ impl OxideApp {
         self.selected_object = Some(object.clone());
         if object.kind == "table" || object.kind == "view" {
             self.selected_table = Some(object.name.clone());
+            self.selected_row_index = None;
             self.table_offset = 0;
             self.load_table(&object.name);
             self.active_tab = WorkspaceTab::Data;
@@ -173,12 +275,22 @@ impl OxideApp {
     }
 
     fn load_table(&mut self, table: &str) {
+        // A refresh invalidates the row-index selection; never carry an index onto a new snapshot.
+        self.selected_row_index = None;
         match self.database.table_data(table, TABLE_PAGE_SIZE + 1, self.table_offset) {
             Ok(mut data) => {
                 self.table_has_next = data.rows.len() > TABLE_PAGE_SIZE;
                 data.rows.truncate(TABLE_PAGE_SIZE);
+                data.raw_rows.truncate(TABLE_PAGE_SIZE);
+                data.row_identities.truncate(TABLE_PAGE_SIZE);
                 self.table_data = data;
                 self.table_columns = self.database.table_columns(table).unwrap_or_default();
+                if !self.table_columns.iter().any(|column| column.name == self.schema_selected_column) {
+                    self.schema_selected_column = self.table_columns.first().map(|column| column.name.clone()).unwrap_or_default();
+                }
+                if self.selected_row_index.is_some_and(|index| index >= self.table_data.rows.len()) {
+                    self.selected_row_index = None;
+                }
                 self.last_error = None;
             }
             Err(error) => self.set_error(error),
@@ -236,6 +348,372 @@ impl OxideApp {
                     format!("Integrity check: {}", messages.join("; "))
                 };
                 self.last_error = None;
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn open_insert_dialog(&mut self, table: &str) {
+        if self.database.is_read_only() { return; }
+        match self.database.table_columns(table) {
+            Ok(columns) => {
+                let fields = columns.into_iter().map(|column| RowField {
+                    name: column.name,
+                    data_type: column.data_type,
+                    text: String::new(),
+                    initial_text: String::new(),
+                    is_null: true,
+                    initial_is_null: true,
+                    include: column.hidden == 0 && column.default_value.is_none() && column.primary_key_order == 0,
+                    editable: column.hidden == 0,
+                }).collect();
+                self.row_editor = Some(RowEditorState { mode: RowEditorMode::Insert, table: table.to_owned(), fields, identity: None });
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn open_edit_dialog(&mut self, table: &str, index: usize) {
+        if self.database.is_read_only() { return; }
+        let Some(values) = self.table_data.raw_rows.get(index) else { return; };
+        let Some(Some(identity)) = self.table_data.row_identities.get(index) else {
+            self.status_message = "This row has no safe identity; editing is disabled for this table".to_owned();
+            return;
+        };
+        let columns = self.table_columns.clone();
+        let fields = columns.into_iter().zip(values.iter()).map(|(column, value)| {
+            let text = sql_value_to_input(value);
+            RowField {
+                name: column.name,
+                data_type: column.data_type,
+                initial_text: text.clone(),
+                text,
+                is_null: matches!(value, Value::Null),
+                initial_is_null: matches!(value, Value::Null),
+                include: true,
+                editable: column.hidden == 0,
+            }
+        }).collect();
+        self.row_editor = Some(RowEditorState {
+            mode: RowEditorMode::Update,
+            table: table.to_owned(),
+            fields,
+            identity: Some(identity.clone()),
+        });
+    }
+
+    fn save_row_editor(&mut self) {
+        let Some(editor) = self.row_editor.as_ref().cloned() else { return; };
+        let mut values: Vec<(String, SqlValue)> = Vec::new();
+        for field in &editor.fields {
+            if !field.editable { continue; }
+            if editor.mode == RowEditorMode::Insert && !field.include { continue; }
+            if editor.mode == RowEditorMode::Update
+                && field.text == field.initial_text
+                && field.is_null == field.initial_is_null
+            {
+                continue;
+            }
+            match field_to_sql_value(field) {
+                Ok(value) => values.push((field.name.clone(), value)),
+                Err(error) => {
+                    self.set_error(format!("{}: {error}", field.name));
+                    return;
+                }
+            }
+        }
+        let result = match editor.mode {
+            RowEditorMode::Insert => self.database.insert_row(&editor.table, &values).map(|count| ("Inserted", count)),
+            RowEditorMode::Update => {
+                if values.is_empty() {
+                    self.status_message = "No values were changed".to_owned();
+                    self.row_editor = None;
+                    return;
+                }
+                let Some(identity) = editor.identity.as_ref() else {
+                    self.set_error("The selected row has no stable identity");
+                    return;
+                };
+                self.database.update_row(&editor.table, identity, &values).map(|count| ("Updated", count))
+            }
+        };
+        match result {
+            Ok((verb, count)) => {
+                self.row_editor = None;
+                self.selected_row_index = None;
+                self.status_message = format!("{verb} {count} row(s) in {}", editor.table);
+                self.refresh_database();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn request_delete_selected(&mut self) {
+        let Some(table) = self.selected_table.clone() else { return; };
+        let Some(index) = self.selected_row_index else { return; };
+        let Some(Some(identity)) = self.table_data.row_identities.get(index) else {
+            self.status_message = "Delete is unavailable because this row has no safe identity".to_owned();
+            return;
+        };
+        let summary = self.table_data.rows.get(index).map(|row| row.iter().take(3).cloned().collect::<Vec<_>>().join(" · ")).unwrap_or_default();
+        self.pending_destructive = Some(PendingDestructive {
+            action: DestructiveAction::DeleteRow { table: table.clone(), identity: identity.clone() },
+            title: "Delete selected row?".to_owned(),
+            warning: format!("This permanently deletes one row from {table}. Preview: {summary}. The operation is not recoverable after commit."),
+            confirm_token: "DELETE".to_owned(),
+            typed_confirmation: String::new(),
+        });
+    }
+
+    fn request_drop_table(&mut self, table: &str) {
+        self.pending_destructive = Some(PendingDestructive {
+            action: DestructiveAction::DropTable { table: table.to_owned() },
+            title: format!("Drop table {table}?"),
+            warning: "This removes the table and all of its rows. Dependent views, triggers or foreign-key relationships may prevent the operation or be affected by SQLite's schema rules. Create a backup before proceeding.".to_owned(),
+            confirm_token: table.to_owned(),
+            typed_confirmation: String::new(),
+        });
+    }
+
+    fn request_drop_column(&mut self, table: &str, column: &str) {
+        self.pending_destructive = Some(PendingDestructive {
+            action: DestructiveAction::DropColumn { table: table.to_owned(), column: column.to_owned() },
+            title: format!("Drop column {column}?"),
+            warning: format!("This permanently removes column {column} and every value stored in it. Indexes, constraints, generated expressions or dependent objects may cause SQLite to reject the operation. Create a backup first."),
+            confirm_token: column.to_owned(),
+            typed_confirmation: String::new(),
+        });
+    }
+
+    fn perform_destructive_action(&mut self, action: DestructiveAction) {
+        let result = match &action {
+            DestructiveAction::DeleteRow { table, identity } => self.database.delete_row(table, identity),
+            DestructiveAction::DropTable { table } => self.database.drop_table(table).map(|_| 1),
+            DestructiveAction::DropColumn { table, column } => self.database.drop_column(table, column).map(|_| 1),
+            DestructiveAction::RollbackTransaction => self.database.rollback_transaction().map(|_| 1),
+        };
+        match result {
+            Ok(affected) => {
+                match action {
+                    DestructiveAction::DeleteRow { table, .. } => self.status_message = format!("Deleted {affected} row(s) from {table}"),
+                    DestructiveAction::DropTable { table } => {
+                        self.selected_table = None;
+                        self.selected_object = None;
+                        self.selected_row_index = None;
+                        self.status_message = format!("Dropped table {table}");
+                    }
+                    DestructiveAction::DropColumn { table, column } => self.status_message = format!("Dropped column {column} from {table}"),
+                    DestructiveAction::RollbackTransaction => self.status_message = "Transaction rolled back; uncommitted changes were discarded".to_owned(),
+                }
+                self.selected_row_index = None;
+                self.refresh_database();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn create_table_from_dialog(&mut self) {
+        let columns = self.create_table_columns.iter().map(|column| ColumnSpec {
+            name: column.name.trim().to_owned(),
+            data_type: column.data_type.trim().to_owned(),
+            not_null: column.not_null,
+            primary_key: column.primary_key,
+        }).collect::<Vec<_>>();
+        match self.database.create_table(self.create_table_name.trim(), &columns) {
+            Ok(()) => {
+                let name = self.create_table_name.trim().to_owned();
+                self.show_create_table = false;
+                self.create_table_name.clear();
+                self.status_message = format!("Created table {name}");
+                self.refresh_database();
+                self.select_named_object(&name);
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn show_row_editor(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut save = false;
+        let mut cancel = false;
+        if let Some(editor) = self.row_editor.as_mut() {
+            let title = if editor.mode == RowEditorMode::Insert { format!("Insert row · {}", editor.table) } else { format!("Edit row · {}", editor.table) };
+            egui::Window::new(title).collapsible(false).resizable(true).default_width(560.0).open(&mut open).show(ctx, |ui| {
+                ui.label("Values are bound as SQLite parameters. Use NULL explicitly; an empty text field is an empty string.");
+                ui.add_space(8.0);
+                ScrollArea::vertical().max_height(470.0).show(ui, |ui| {
+                    for field in &mut editor.fields {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&field.name).strong());
+                                ui.label(RichText::new(if field.data_type.is_empty() { "ANY" } else { &field.data_type }).small().weak());
+                                if !field.editable { ui.label(RichText::new("GENERATED").small().color(Color32::from_rgb(239, 191, 103))); }
+                            });
+                            ui.horizontal(|ui| {
+                                if editor.mode == RowEditorMode::Insert {
+                                    ui.add_enabled(field.editable, egui::Checkbox::new(&mut field.include, "Include"));
+                                }
+                                let value_enabled = field.editable && (editor.mode != RowEditorMode::Insert || field.include);
+                                ui.add_enabled(value_enabled, egui::Checkbox::new(&mut field.is_null, "NULL"));
+                                ui.add_enabled(value_enabled && !field.is_null, TextEdit::singleline(&mut field.text).desired_width(f32::INFINITY).hint_text("Value (BLOB: hex:0011…)"));
+                            });
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(if editor.mode == RowEditorMode::Insert { "Insert row" } else { "Save changes" }).clicked() { save = true; }
+                    if ui.button("Cancel").clicked() { cancel = true; }
+                });
+            });
+        }
+        if cancel || !open { self.row_editor = None; }
+        if save { self.save_row_editor(); }
+    }
+
+    fn show_destructive_confirmation(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        if let Some(pending) = self.pending_destructive.as_mut() {
+            egui::Window::new(&pending.title).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+                ui.label(RichText::new(&pending.warning).color(Color32::from_rgb(245, 178, 112)));
+                ui.add_space(8.0);
+                ui.label(format!("Type {} exactly to confirm:", pending.confirm_token));
+                ui.add(TextEdit::singleline(&mut pending.typed_confirmation).desired_width(320.0));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(pending.typed_confirmation == pending.confirm_token, egui::Button::new("Confirm destructive action")).clicked() { confirm = true; }
+                    if ui.button("Cancel").clicked() { cancel = true; }
+                });
+            });
+        }
+        if cancel || !open { self.pending_destructive = None; }
+        if confirm && let Some(pending) = self.pending_destructive.take() {
+            self.perform_destructive_action(pending.action);
+        }
+    }
+
+    fn show_create_table_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut create = false;
+        let mut cancel = false;
+        if self.show_create_table {
+            egui::Window::new("Create table").collapsible(false).resizable(true).default_width(620.0).open(&mut open).show(ctx, |ui| {
+                ui.label("Define columns and an optional single or composite primary key.");
+                ui.horizontal(|ui| {
+                    ui.label("Table name");
+                    ui.add(TextEdit::singleline(&mut self.create_table_name).desired_width(260.0));
+                });
+                ui.separator();
+                let mut remove_at = None;
+                ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for (index, column) in self.create_table_columns.iter_mut().enumerate() {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Column {}", index + 1));
+                                ui.add(TextEdit::singleline(&mut column.name).desired_width(150.0).hint_text("name"));
+                                ui.add(TextEdit::singleline(&mut column.data_type).desired_width(120.0).hint_text("TEXT"));
+                                ui.checkbox(&mut column.not_null, "NOT NULL");
+                                ui.checkbox(&mut column.primary_key, "PK");
+                                if ui.small_button("Remove").clicked() { remove_at = Some(index); }
+                            });
+                        });
+                    }
+                });
+                if let Some(index) = remove_at && self.create_table_columns.len() > 1 {
+                    self.create_table_columns.remove(index);
+                }
+                if ui.button("+ Add column").clicked() {
+                    self.create_table_columns.push(ColumnDraft { name: String::new(), data_type: "TEXT".into(), not_null: false, primary_key: false });
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Create table").clicked() { create = true; }
+                    if ui.button("Cancel").clicked() { cancel = true; }
+                });
+            });
+        }
+        if cancel || !open { self.show_create_table = false; }
+        if create { self.create_table_from_dialog(); }
+    }
+
+    fn show_transaction_controls(&mut self, ui: &mut egui::Ui) {
+        let active = self.database.is_in_transaction();
+        ui.separator();
+        if active {
+            ui.label(RichText::new("TRANSACTION ACTIVE").small().strong().color(Color32::from_rgb(239, 191, 103)));
+            if ui.button("Commit").clicked() {
+                match self.database.commit_transaction() {
+                    Ok(()) => self.status_message = "Transaction committed".to_owned(),
+                    Err(error) => self.set_error(error),
+                }
+                self.refresh_database();
+            }
+            if ui.button("Rollback…").clicked() {
+                self.pending_destructive = Some(PendingDestructive {
+                    action: DestructiveAction::RollbackTransaction,
+                    title: "Roll back the active transaction?".to_owned(),
+                    warning: "Every write made since BEGIN will be discarded. This cannot be undone after rollback.".to_owned(),
+                    confirm_token: "ROLLBACK".to_owned(),
+                    typed_confirmation: String::new(),
+                });
+            }
+        } else {
+            ui.add_enabled_ui(self.database.is_open() && !self.database.is_read_only(), |ui| {
+                egui::ComboBox::from_id_salt("transaction-mode")
+                    .selected_text(match self.transaction_mode { TransactionMode::Deferred => "Deferred", TransactionMode::Immediate => "Immediate", TransactionMode::Exclusive => "Exclusive" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.transaction_mode, TransactionMode::Deferred, "Deferred");
+                        ui.selectable_value(&mut self.transaction_mode, TransactionMode::Immediate, "Immediate");
+                        ui.selectable_value(&mut self.transaction_mode, TransactionMode::Exclusive, "Exclusive");
+                    });
+            });
+            if ui.add_enabled(self.database.is_open() && !self.database.is_read_only(), egui::Button::new("Begin transaction")).clicked() {
+                match self.database.begin_transaction(self.transaction_mode) {
+                    Ok(()) => self.status_message = format!("{} transaction started", match self.transaction_mode { TransactionMode::Deferred => "Deferred", TransactionMode::Immediate => "Immediate", TransactionMode::Exclusive => "Exclusive" }),
+                    Err(error) => self.set_error(error),
+                }
+            }
+        }
+    }
+
+    fn add_selected_column(&mut self, table: &str) {
+        let default = if self.schema_default_enabled { Some(Value::Text(self.schema_default_value.clone())) } else { None };
+        match self.database.add_column(table, &self.schema_new_column_name, &self.schema_new_column_type, self.schema_new_column_not_null, default.as_ref()) {
+            Ok(()) => {
+                self.status_message = format!("Added column {}", self.schema_new_column_name);
+                self.schema_new_column_name.clear();
+                self.schema_default_value.clear();
+                self.schema_default_enabled = false;
+                self.refresh_database();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn rename_selected_column(&mut self, table: &str) {
+        if self.schema_selected_column.is_empty() { return; }
+        match self.database.rename_column(table, &self.schema_selected_column, &self.schema_rename_column_value) {
+            Ok(()) => {
+                self.status_message = format!("Renamed column {}", self.schema_selected_column);
+                self.schema_selected_column = self.schema_rename_column_value.clone();
+                self.schema_rename_column_value.clear();
+                self.refresh_database();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn rename_selected_table(&mut self, table: &str, new_name: &str) {
+        match self.database.rename_table(table, new_name) {
+            Ok(()) => {
+                let name = new_name.to_owned();
+                self.selected_table = Some(name.clone());
+                self.status_message = format!("Renamed table to {name}");
+                self.schema_rename_table_value.clear();
+                self.refresh_database();
+                self.select_named_object(&name);
             }
             Err(error) => self.set_error(error),
         }
@@ -312,6 +790,7 @@ impl OxideApp {
                         if ui.button("New database").clicked() {
                             self.create_dialog();
                         }
+                        self.show_transaction_controls(ui);
                     });
                 });
             });
@@ -339,6 +818,11 @@ impl OxideApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.small_button("↻").on_hover_text("Refresh schema").clicked() {
                             self.refresh_database();
+                        }
+                        if ui.add_enabled(self.database.is_open() && !self.database.is_read_only(), egui::Button::new("+"))
+                            .on_hover_text("Create table").clicked()
+                        {
+                            self.show_create_table = true;
                         }
                     });
                 });
@@ -439,7 +923,7 @@ impl OxideApp {
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     ui.separator();
                     ui.label(
-                        RichText::new("OXIDE STUDIO  ·  0.1.0")
+                        RichText::new("OXIDE STUDIO  ·  0.2.0")
                             .size(10.0)
                             .color(Color32::from_rgb(106, 125, 147)),
                     );
@@ -513,30 +997,36 @@ impl OxideApp {
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let writable_table = self.selected_object.as_ref().is_some_and(|object| object.kind == "table")
+                    && !self.database.is_read_only();
+                let selected_identity = self.selected_row_index
+                    .and_then(|index| self.table_data.row_identities.get(index))
+                    .is_some_and(Option::is_some);
                 if ui.button("Structure").clicked() {
                     self.active_tab = WorkspaceTab::Structure;
+                }
+                if ui.add_enabled(writable_table && selected_identity, egui::Button::new("Delete selected")).clicked() {
+                    self.request_delete_selected();
+                }
+                if ui.add_enabled(writable_table && selected_identity, egui::Button::new("Edit selected")).clicked()
+                    && let Some(index) = self.selected_row_index
+                {
+                    self.open_edit_dialog(&table, index);
+                }
+                if ui.add_enabled(writable_table, egui::Button::new("+ New row")).clicked() {
+                    self.open_insert_dialog(&table);
                 }
                 if ui.button("↻ Refresh").clicked() {
                     self.load_table(&table);
                 }
-                if ui
-                    .add_enabled(
-                        self.table_offset >= TABLE_PAGE_SIZE,
-                        egui::Button::new("← Previous"),
-                    )
-                    .clicked()
-                {
+                if ui.add_enabled(self.table_offset >= TABLE_PAGE_SIZE, egui::Button::new("← Previous")).clicked() {
                     self.table_offset = self.table_offset.saturating_sub(TABLE_PAGE_SIZE);
+                    self.selected_row_index = None;
                     self.load_table(&table);
                 }
-                if ui
-                    .add_enabled(
-                        self.table_has_next,
-                        egui::Button::new("Next →"),
-                    )
-                    .clicked()
-                {
+                if ui.add_enabled(self.table_has_next, egui::Button::new("Next →")).clicked() {
                     self.table_offset += TABLE_PAGE_SIZE;
+                    self.selected_row_index = None;
                     self.load_table(&table);
                 }
             });
@@ -581,6 +1071,7 @@ impl OxideApp {
                             .min_col_width(110.0)
                             .spacing([18.0, 9.0])
                             .show(ui, |ui| {
+                                ui.label(RichText::new("ROW").strong().color(Color32::from_rgb(127, 224, 207)));
                                 for column in &columns {
                                     ui.label(
                                         RichText::new(column)
@@ -589,7 +1080,11 @@ impl OxideApp {
                                     );
                                 }
                                 ui.end_row();
-                                for row in &rows {
+                                for (row_index, row) in rows.iter().enumerate() {
+                                    let selected = self.selected_row_index == Some(row_index);
+                                    if ui.selectable_label(selected, format!("{}", self.table_offset + row_index + 1)).clicked() {
+                                        self.selected_row_index = Some(row_index);
+                                    }
                                     for value in row {
                                         let text = if value == "NULL" {
                                             RichText::new(value)
@@ -612,6 +1107,16 @@ impl OxideApp {
                 RichText::new("No rows found on this page.")
                     .color(Color32::from_rgb(140, 157, 177)),
             );
+        } else if let Some(index) = self.selected_row_index {
+            if let Some(Some(identity)) = self.table_data.row_identities.get(index) {
+                let description = match identity {
+                    RowIdentity::PrimaryKey(_) => "Selected row is identified by its declared primary key.",
+                    RowIdentity::RowId { .. } => "Selected row is identified by an internal rowid fallback.",
+                };
+                ui.label(RichText::new(description).small().weak());
+            } else {
+                ui.label(RichText::new("Selected row has no safe edit identity; use read-only browsing or add a declared primary key.").small().color(Color32::from_rgb(239, 191, 103)));
+            }
         }
     }
 
@@ -747,9 +1252,14 @@ impl OxideApp {
         }
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Prototype note: one SQL statement per run; bind parameters are not exposed in the UI yet. Results are capped at 1,000 rows.")
+            RichText::new("One statement per run · results capped at 1,000 rows · use the transaction controls in the top bar to group writes.")
                 .small()
                 .color(Color32::from_rgb(112, 131, 152)),
+        );
+        ui.label(
+            RichText::new("Advanced SQL runs directly on the active connection. Review destructive DDL/DML carefully; confirmation dialogs apply to the guided editor workflows.")
+                .small()
+                .color(Color32::from_rgb(239, 191, 103)),
         );
     }
 
@@ -758,6 +1268,12 @@ impl OxideApp {
             ui.centered_and_justified(|ui| ui.label("Select a schema object from the explorer."));
             return;
         };
+        let mut rename_table_to: Option<String> = None;
+        let mut add_column_requested = false;
+        let mut rename_column_requested = false;
+        let mut drop_table_requested = false;
+        let mut drop_column_requested = false;
+        let columns_for_tools = self.table_columns.clone();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading(RichText::new(&object.name).size(22.0));
@@ -777,6 +1293,48 @@ impl OxideApp {
             });
         });
         ui.add_space(12.0);
+        if object.kind == "table" && !self.database.is_read_only() {
+            egui::Frame::new()
+                .fill(Color32::from_rgb(17, 27, 38))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("SCHEMA EDITOR").strong().size(10.0).color(Color32::from_rgb(127, 224, 207)));
+                    ui.horizontal(|ui| {
+                        ui.label("Rename table");
+                        ui.add(TextEdit::singleline(&mut self.schema_rename_table_value).desired_width(180.0).hint_text("new table name"));
+                        if ui.add_enabled(!self.schema_rename_table_value.trim().is_empty(), egui::Button::new("Rename")).clicked() {
+                            rename_table_to = Some(self.schema_rename_table_value.trim().to_owned());
+                        }
+                        if ui.button("Drop table…").clicked() { drop_table_requested = true; }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Add column");
+                        ui.add(TextEdit::singleline(&mut self.schema_new_column_name).desired_width(130.0).hint_text("column name"));
+                        ui.add(TextEdit::singleline(&mut self.schema_new_column_type).desired_width(100.0).hint_text("TEXT"));
+                        ui.checkbox(&mut self.schema_new_column_not_null, "NOT NULL");
+                        ui.checkbox(&mut self.schema_default_enabled, "Default");
+                        ui.add_enabled(self.schema_default_enabled, TextEdit::singleline(&mut self.schema_default_value).desired_width(110.0).hint_text("literal value"));
+                        if ui.add_enabled(!self.schema_new_column_name.trim().is_empty(), egui::Button::new("Add")).clicked() { add_column_requested = true; }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Rename / drop column");
+                        egui::ComboBox::from_id_salt("schema-column-select")
+                            .selected_text(if self.schema_selected_column.is_empty() { "Select column" } else { self.schema_selected_column.as_str() })
+                            .show_ui(ui, |ui| {
+                                for column in &columns_for_tools {
+                                    ui.selectable_value(&mut self.schema_selected_column, column.name.clone(), &column.name);
+                                }
+                            });
+                        ui.add(TextEdit::singleline(&mut self.schema_rename_column_value).desired_width(130.0).hint_text("new column name"));
+                        if ui.add_enabled(!self.schema_selected_column.is_empty() && !self.schema_rename_column_value.trim().is_empty(), egui::Button::new("Rename column")).clicked() { rename_column_requested = true; }
+                        if ui.add_enabled(!self.schema_selected_column.is_empty(), egui::Button::new("Drop column…")).clicked() { drop_column_requested = true; }
+                    });
+                    ui.label(RichText::new("Defaults are stored as literal values. SQLite validates constraints and dependencies; unsupported ALTER operations fail without committing a partial change.").small().weak());
+                });
+        }
         if object.kind == "table" || object.kind == "view" {
             ui.label(
                 RichText::new("COLUMNS")
@@ -822,6 +1380,17 @@ impl OxideApp {
                             }
                         });
                 });
+        }
+        if let Some(new_name) = rename_table_to {
+            self.rename_selected_table(&object.name, &new_name);
+            self.schema_rename_table_value.clear();
+        }
+        if add_column_requested { self.add_selected_column(&object.name); }
+        if rename_column_requested { self.rename_selected_column(&object.name); }
+        if drop_table_requested { self.request_drop_table(&object.name); }
+        if drop_column_requested {
+            let column = self.schema_selected_column.clone();
+            self.request_drop_column(&object.name, &column);
         }
         ui.add_space(14.0);
         ui.label(
@@ -971,7 +1540,7 @@ impl OxideApp {
                         RichText::new("Oxide Studio")
                             .color(Color32::from_rgb(113, 224, 204)),
                     );
-                    ui.label("Version 0.1.0 · Prototype");
+                    ui.label("Version 0.2.0 · Data editing and transaction management");
                     ui.label("A native Rust workspace for SQLite database exploration.");
                     ui.add_space(8.0);
                     ui.label(
@@ -982,6 +1551,51 @@ impl OxideApp {
                 });
         }
     }
+}
+
+fn sql_value_to_input(value: &SqlValue) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Integer(value) => value.to_string(),
+        Value::Real(value) => value.to_string(),
+        Value::Text(value) => value.clone(),
+        Value::Blob(value) => format!("hex:{}", value.iter().map(|byte| format!("{byte:02X}")).collect::<String>()),
+    }
+}
+
+fn field_to_sql_value(field: &RowField) -> Result<SqlValue> {
+    if field.is_null { return Ok(Value::Null); }
+    if let Some(hex) = field.text.strip_prefix("hex:") {
+        if hex.len() % 2 != 0 { return Err(anyhow!("BLOB hex input must contain an even number of characters")); }
+        let bytes = (0..hex.len()).step_by(2).map(|index| {
+            u8::from_str_radix(&hex[index..index + 2], 16)
+                .map_err(|_| anyhow!("BLOB value contains a non-hexadecimal character"))
+        }).collect::<Result<Vec<_>>>()?;
+        return Ok(Value::Blob(bytes));
+    }
+
+    let kind = field.data_type.to_ascii_uppercase();
+    let value = field.text.clone();
+    if kind.contains("INT") {
+        return value.trim().parse::<i64>()
+            .map(Value::Integer)
+            .map_err(|_| anyhow!("expected a valid 64-bit integer"));
+    }
+    if kind.contains("REAL") || kind.contains("FLOA") || kind.contains("DOUB") {
+        let parsed = value.trim().parse::<f64>().map_err(|_| anyhow!("expected a valid number"))?;
+        if !parsed.is_finite() { return Err(anyhow!("non-finite numbers are not supported")); }
+        return Ok(Value::Real(parsed));
+    }
+    if kind.contains("NUMERIC") || kind.contains("DECIMAL") || kind.contains("BOOLEAN") || kind.contains("BOOL") {
+        if let Ok(integer) = value.trim().parse::<i64>() { return Ok(Value::Integer(integer)); }
+        if let Ok(real) = value.trim().parse::<f64>() && real.is_finite() {
+            return Ok(Value::Real(real));
+        }
+    }
+    if kind.contains("BLOB") {
+        return Err(anyhow!("BLOB values must use the hex: prefix"));
+    }
+    Ok(Value::Text(value))
 }
 
 impl eframe::App for OxideApp {
@@ -1011,5 +1625,47 @@ impl eframe::App for OxideApp {
             });
 
         self.show_about(&ctx);
+        self.show_row_editor(&ctx);
+        self.show_destructive_confirmation(&ctx);
+        self.show_create_table_dialog(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::*;
+
+    fn field(data_type: &str, text: &str, is_null: bool) -> RowField {
+        RowField {
+            name: "value".to_owned(),
+            data_type: data_type.to_owned(),
+            text: text.to_owned(),
+            initial_text: String::new(),
+            is_null,
+            initial_is_null: true,
+            include: true,
+            editable: true,
+        }
+    }
+
+    #[test]
+    fn null_and_empty_text_are_distinct() {
+        assert_eq!(field_to_sql_value(&field("TEXT", "", true)).unwrap(), Value::Null);
+        assert_eq!(field_to_sql_value(&field("TEXT", "", false)).unwrap(), Value::Text(String::new()));
+    }
+
+    #[test]
+    fn numeric_fields_are_parsed_and_invalid_values_are_rejected() {
+        assert_eq!(field_to_sql_value(&field("INTEGER", "42", false)).unwrap(), Value::Integer(42));
+        assert_eq!(field_to_sql_value(&field("REAL", "3.5", false)).unwrap(), Value::Real(3.5));
+        assert!(field_to_sql_value(&field("INTEGER", "42x", false)).is_err());
+        assert!(field_to_sql_value(&field("REAL", "NaN", false)).is_err());
+    }
+
+    #[test]
+    fn blob_fields_accept_valid_hex_only() {
+        assert_eq!(field_to_sql_value(&field("BLOB", "hex:00a1FF", false)).unwrap(), Value::Blob(vec![0, 0xA1, 0xFF]));
+        assert!(field_to_sql_value(&field("BLOB", "hex:0", false)).is_err());
+        assert!(field_to_sql_value(&field("BLOB", "plain text", false)).is_err());
     }
 }
