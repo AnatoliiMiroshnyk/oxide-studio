@@ -1,50 +1,39 @@
 # Changelog
 
-All notable changes to Oxide Studio are documented here.
+Notable changes to Oxide Studio are recorded here. Dates use ISO 8601 calendar dates.
 
-The project follows a lightweight Keep a Changelog structure and Semantic Versioning once stable release contracts are established.
-
-## [Unreleased]
-
-### Changed
-
-- Renamed the product branding, Rust package, application type, executable, branding asset, and project documentation to Oxide Studio.
-
-### Fixed
-
-- Updated SQLite column-name collection to consume the iterator returned by `rusqlite` directly.
-- Updated egui styling to use the per-theme `style_mut_of` API and explicitly select the dark theme, compatible with egui 0.37.
-
-## [0.1.0] - 2026-11-09
+## [0.2.0] - 2026-11-09
 
 ### Added
-- Initial native Rust desktop application.
-- SQLite database connection management.
-- Database creation and opening.
-- Read-only database mode.
-- Database schema explorer.
-- Tables, views, indexes and triggers inspection.
-- Table and view data browser.
-- SQL workbench.
-- SQL query execution.
-- Query result grid.
-- Session-based SQL history.
-- CSV export.
-- SQLite integrity checking.
-- Dark desktop interface.
+- Typed SQLite value retention for data browsing and editing, including distinct `NULL`, integer, real, text, and BLOB handling.
+- Guided row insertion, update, and deletion with bound values.
+- Primary-key-based row identity for single and composite keys, plus hidden-rowid fallback for eligible rowid tables without a declared primary key.
+- Table creation with one or more primary-key columns.
+- Table rename, column add/rename/drop, and table drop workflows.
+- Per-operation SQLite savepoints for row and schema mutations.
+- Explicit `DEFERRED`, `IMMEDIATE`, and `EXCLUSIVE` transaction controls with commit and confirmation-gated rollback.
+- Destructive-operation confirmation dialogs that require typing `DELETE`, the target object name, or `ROLLBACK`.
+- Editing/transaction documentation, migration guide, release notes, and expanded database tests.
 
-### Documentation
-- Added architecture documentation.
-- Added product requirements.
-- Added security model.
-- Added development guide.
-- Added user guide.
-- Added feature roadmap.
-- Added contribution guidelines.
+### Changed
+- Version and in-app product identity updated to `0.2.0`.
+- Read-only sessions disable guided editing and transaction start; an SQL-created read transaction can still be ended.
+- The data browser now exposes row selection and guided editing actions.
+- Schema and security documentation now describe the 0.2 write paths and SQL Workbench boundary.
 
-### Notes
-- Initial prototype release.
-- Some advanced SQLiteStudio features are planned
-  for future versions.
+### Limitations
+- Database operations remain synchronous on the UI thread.
+- Raw SQL in the SQL Workbench is not sandboxed and bypasses guided destructive-action confirmations.
+- Existing column type/constraint changes requiring a table rebuild, dedicated index/trigger editors, SQL parameter UI, import, backup/restore, and script execution are deferred.
+- Source validation in the generation environment did not include Rust compilation or native GUI execution; see `docs/BUILD_VALIDATION.md`.
 
-## [0.2.0]
+## [0.1.0] - 2026-11-07
+
+### Added
+- Native Rust desktop application shell with a dark egui interface.
+- Open/create SQLite databases and read-only sessions.
+- Schema explorer for tables, views, indexes, and triggers.
+- Paginated table/view browsing and column metadata inspection.
+- Single-statement SQL workbench, bounded results, and session query history.
+- CSV export and SQLite integrity check.
+- Demo SQL fixture, CI workflow, user/developer documentation, and repository templates.
