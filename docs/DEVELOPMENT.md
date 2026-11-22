@@ -99,3 +99,12 @@ The app enables foreign-key enforcement on each connection and requests WAL mode
 - Run the full CI matrix after updating eframe/egui, rusqlite/SQLite, or rfd.
 - Consider `cargo audit` and `cargo deny check` as part of the release pipeline once policy files are adopted.
 - Commit `Cargo.lock` for the application repository after the first verified Cargo resolution. It is intentionally not fabricated in this source bundle because Cargo is not installed in the generation environment.
+
+
+## v0.2.0 editing and transaction development
+
+Database mutations belong in `src/db/mutations.rs`; keep UI forms in `src/app/mod.rs` free of handwritten DML strings. Use the shared identifier quoting helper for schema names and rusqlite bound parameters for values. Extend database tests for every write path, including constraint failures, composite keys, rowid fallback, savepoint rollback, and active-transaction behavior.
+
+Do not add generic `ALTER TABLE` table-rebuild support by composing SQL strings in the UI. A migration implementation must preserve or explicitly reject indexes, triggers, generated columns, collations, CHECK/UNIQUE constraints, foreign keys, dependent views, and AUTOINCREMENT state, and must present a reviewable migration plan before execution.
+
+For editing workflows, test on copies and never use real production databases as fixtures. The SQL Workbench is direct SQL and must remain documented as bypassing the guided confirmation layer.

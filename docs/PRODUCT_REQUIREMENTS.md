@@ -1,6 +1,6 @@
 # Product requirements — Oxide Studio
 
-**Document status:** baseline for the 0.x prototype; requirements for 1.0 are targets, not implemented claims.
+**Document status:** v0.2.0 implementation baseline; requirements for 1.0 are targets, not implemented claims.
 
 ## 1. Product definition
 
@@ -35,7 +35,7 @@ The product is intended as a credible alternative to SQLiteStudio, not as a reim
 | Database maintainer | Inspect schema, indexes, constraints, and integrity | Understand schema and diagnose issues without modifying data accidentally |
 | Learner / educator | Explore SQLite concepts and test SQL safely | Demo workspace works with zero setup and read-only mode is obvious |
 
-## 4. Core workflows
+## 4. Target core workflows (1.0)
 
 1. **Open and inspect:** choose a database file, inspect object counts, find a table, browse a bounded page, switch to structure, and copy or export results.
 2. **Query:** open a SQL tab, write a statement, bind typed parameters, execute, inspect result metadata, cancel a long query, and export all result rows through a streaming path.
@@ -48,7 +48,7 @@ The product is intended as a credible alternative to SQLiteStudio, not as a reim
 
 Priority: **P0** = needed for a usable 1.0; **P1** = important post-1.0; **P2** = optional/advanced.
 
-| ID | Requirement | Priority | v0.1.0 status |
+| ID | Requirement | Priority | v0.2.0 status |
 |---|---|---:|---|
 | DB-01 | Open existing SQLite database files | P0 | Implemented |
 | DB-02 | Create a new SQLite database file | P0 | Implemented |
@@ -58,17 +58,21 @@ Priority: **P0** = needed for a usable 1.0; **P1** = important post-1.0; **P2** 
 | SC-01 | Browse tables, views, indexes, and triggers | P0 | Implemented |
 | SC-02 | Inspect column declarations, nullability, defaults, primary keys, and DDL | P0 | Basic implementation |
 | SC-03 | Search/filter schema objects | P0 | Name filter implemented |
-| SC-04 | Create, alter, rename, and drop schema objects with preview | P0 | Not implemented |
+| SC-04 | Create and perform supported rename/add/drop schema operations | P0 | Guided subset implemented; no generic table rebuild |
 | SC-05 | Visualize foreign-key relationships and ER diagrams | P1 | Not implemented |
 | DATA-01 | Browse rows with pagination | P0 | Implemented, 200 rows/page |
 | DATA-02 | Sort, filter, search, and select columns | P0 | Not implemented |
-| DATA-03 | Insert, edit, duplicate, and delete rows | P0 | Not implemented |
-| DATA-04 | Preserve typed NULL, integer, real, text, and BLOB values | P0 | Display-only string conversion |
+| DATA-03 | Insert, edit, and delete rows | P0 | Guided forms implemented; no duplicate-row action |
+| DATA-04 | Preserve typed NULL, integer, real, text, and BLOB values | P0 | Owned typed values for edit pages; numeric affinity parsing and hex BLOB editor |
+| DATA-05 | Identify records using primary keys, composite keys, or safe rowid fallback | P0 | Implemented; rows with no safe identity are browse-only |
 | SQL-01 | Execute SELECT, DML, DDL, and PRAGMA statements | P0 | One prepared statement/run |
 | SQL-02 | Multi-tab SQL editor with saved queries | P0 | Session history only |
 | SQL-03 | Syntax highlighting, completion, formatting, and parameter binding | P0 | Not implemented |
 | SQL-04 | Show execution time, affected rows, errors, and bounded output | P0 | Basic implementation |
 | SQL-05 | Cancel long-running queries and report progress | P0 | Not implemented; synchronous UI execution |
+| TX-01 | Start DEFERRED, IMMEDIATE, and EXCLUSIVE transactions | P0 | Implemented |
+| TX-02 | Commit and confirmation-gated rollback | P0 | Implemented |
+| TX-03 | Execute guided mutations inside recoverable savepoints | P0 | Implemented; savepoint rollback failure is logged |
 | IO-01 | Export query results to CSV | P0 | Current materialized rows only |
 | IO-02 | Import CSV with preview and type/null mapping | P0 | Not implemented |
 | IO-03 | JSON and SQL dump import/export | P1 | Not implemented |
@@ -82,7 +86,11 @@ Priority: **P0** = needed for a usable 1.0; **P1** = important post-1.0; **P2** 
 | UX-03 | Persistent recent files, layout, and workspace state | P0 | Not implemented |
 | EXT-01 | Plugin API with explicit permissions/capability isolation | P2 | Not implemented |
 
-## 6. Non-functional requirements and proposed budgets
+## 6. 0.2.0 scope clarifications
+
+The 0.2.0 implementation deliberately does not claim a generic schema-alter engine. SQLite schema changes that require reconstructing a table are deferred until the product can preview and preserve constraints, indexes, triggers, generated columns, foreign keys, and other dependent objects. The SQL Workbench remains an advanced direct-execution surface; its statements are not intercepted by the guided destructive-confirmation layer. Database work remains synchronous on the UI thread until the worker/actor milestone.
+
+## 7. Non-functional requirements and proposed budgets
 
 These are measurable 1.0 acceptance targets. They must be validated on a documented reference machine and dataset before being advertised.
 

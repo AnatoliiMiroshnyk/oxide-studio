@@ -21,7 +21,7 @@ Future advanced workspaces may add import/export, diagnostics, ER diagrams, comp
 
 ## 3. Visual system
 
-The v0.1.0 theme defines a dark navy surface with a restrained teal accent. Keep semantic colors consistent:
+The v0.2.0 theme defines a dark navy surface with a restrained teal accent. Keep semantic colors consistent:
 
 | Token | Purpose | Current direction |
 |---|---|---|
@@ -60,3 +60,14 @@ Use spacing in a consistent 4-point rhythm. Favor clear grouping, visible labels
 ## 6. Prototype deviations
 
 The current UI is a foundation, not the final design system. It has a dark theme only, a minimal shortcut set, no command palette, no accessibility audit, and no persistent layout preferences. The visual tokens above should be moved into typed theme configuration before adding light/high-contrast themes.
+
+
+## Editing and destructive actions
+
+- Distinguish SQL NULL from an empty string in every editor. Do not infer NULL from an empty field.
+- Show the declared type and provide a clear input hint for numeric and BLOB values.
+- Make selected-row state obvious and keep edit/delete disabled when the row has no safe identity.
+- Separate non-destructive schema operations (create, rename, add) from destructive drop operations.
+- Require typed confirmation for row/table/column deletion and transaction rollback. State the target and consequence in plain language before requiring confirmation.
+- Keep transaction-active state persistently visible while uncommitted writes exist; place Commit and Rollback controls in a stable location.
+- Raw SQL is advanced functionality and must include a durable warning that it bypasses guided confirmation dialogs.

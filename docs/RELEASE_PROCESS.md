@@ -40,7 +40,7 @@ The prototype produces a native executable with `cargo build --release`; it does
 | macOS | Signed and notarized `.dmg` / `.app` bundle |
 | Linux | `.AppImage` plus distro-native `.deb` / `.rpm` packages where feasible |
 
-Keep SQLite and required runtime libraries bundled or explicitly documented. Installer generation, code signing, notarization, update feeds, and auto-update are not part of v0.1.0.
+Keep SQLite and required runtime libraries bundled or explicitly documented. Installer generation, code signing, notarization, update feeds, and auto-update are not part of v0.2.0.
 
 ## 5. Release validation and rollback
 
@@ -53,3 +53,18 @@ Keep SQLite and required runtime libraries bundled or explicitly documented. Ins
 ## 6. Security releases
 
 Treat confirmed vulnerabilities in SQLite, Rust dependencies, or Oxide's file-handling/query paths as release blockers according to severity. Coordinate private disclosure, assess affected versions, publish a patched version and advisory, and avoid publishing proof-of-concept material that exposes user database contents.
+
+
+## 0.2.0 data-safety release gates
+
+Before publishing the 0.2.0 release, verify the following on copies of test databases:
+
+- Row INSERT/UPDATE/DELETE use bound values and correct row identities (single and composite primary keys; eligible rowid fallback).
+- A failed guided mutation rolls back its savepoint without discarding earlier work in an enclosing transaction.
+- DEFERRED, IMMEDIATE, and EXCLUSIVE begin modes, COMMIT, and ROLLBACK work through both UI controls and supported Workbench statements.
+- Read-only sessions disable guided writes and SQLite rejects attempted SQL writes.
+- Table/column drop confirmation requires the exact object name; row deletion requires `DELETE`; transaction rollback requires `ROLLBACK`.
+- The SQL Workbench limitation is visible in release notes: raw SQL bypasses guided confirmation dialogs.
+- Do not advertise generic column type/constraint modification; only the documented schema subset is exposed.
+
+Publish a source archive and platform binaries only after `cargo fmt`, `cargo check`, Clippy, tests, release builds, and native GUI smoke tests pass. Attach SHA-256 checksums for release assets. The current source-generation environment did not run Rust compilation; do not label this source snapshot as build-verified.

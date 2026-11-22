@@ -1,60 +1,64 @@
 # Test strategy
 
-## 1. Quality objectives
+## Principles
 
-Tests must establish that database operations are correct, predictable under malformed input, safe around user files, and bounded in their impact on memory and responsiveness. UI tests should verify workflows, not only that individual widgets render.
+- Test database logic independently of egui.
+- Use in-memory databases for fast behavior tests and temporary files for open/read-only/file lifecycle tests.
+- Treat value fidelity, key targeting, atomicity, and transaction state as data-safety requirements.
+- Do not use example SQL strings as a substitute for negative and failure-path tests.
 
-## 2. Test layers
+## Test layers
 
-| Layer | Scope | Examples | Status in v0.1.0 |
+| Layer | Scope | Examples | 0.2.0 coverage target |
 |---|---|---|---|
-| Unit | Pure conversion and SQL construction helpers | Identifier quoting, value formatting, CSV serialization | Partial |
-| Database unit | One in-memory SQLite connection | Schema enumeration, table metadata, query result mapping, read-only writes | Partial |
-| Integration | Temporary on-disk DBs and sidecar files | Open/create/read-only, WAL, locked DB, corrupt file, export permissions | Planned |
-| UI component | Isolated egui frame/state tests | Empty states, tab transitions, keyboard shortcuts, disabled controls | Planned |
-| End-to-end | Built application on target OS | Open DB, browse, run SQL, export CSV, close/reopen | Planned |
-| Performance | Large and adversarial fixtures | Wide tables, large text, many rows, slow query, large BLOB | Planned |
-| Security | Fault injection, fuzzing, dependency review | Corrupt DB, unusual identifiers, malformed UTF-8, import parser fuzzing | Planned |
+| Unit | Small pure functions | Identifier quoting, type parsing, BLOB hex decoding, display limits | Implemented tests in schema/mutations/app value parsing |
+| Database integration | Real SQLite behavior | CRUD, composite keys, rowid fallback, read-only protection, DDL, transaction commit/rollback | Implemented in-memory/temp-file unit tests |
+| Failure/atomicity | Write failure behavior | Constraint failures inside savepoints, rollback within outer transaction, unsupported DROP COLUMN | Database savepoint/transaction tests included; broaden fixtures before 1.0 |
+| UI interaction | Modal state and user workflows | Insert, edit, delete confirmation, schema confirmation, transaction badge | Manual GUI smoke tests required |
+| Cross-platform | Native build and dialogs | Windows, macOS, Linux launch/open/save | CI build matrix; manual smoke test required |
+| Performance | Large tables/wide values | 100k row offset, large BLOB/TEXT columns, mutation latency | Not yet benchmarked |
+| Security | Adversarial inputs | Quoted identifiers, type injection, malicious text values, read-only SQL | Basic unit tests; security audit deferred |
 
-## 3. Required fixture matrix
+## Required 0.2 database tests
 
-Keep deterministic fixtures for:
+1. Preserve NULL, integer, real, text, and BLOB storage classes when loading typed table pages.
+2. Insert a value containing SQL metacharacters and prove it is stored as data rather than executed as SQL.
+3. Update and delete a row by a single primary key.
+4. Update and delete by a composite primary key in primary-key ordinal order.
+5. Update/delete using an unshadowed hidden rowid when no primary key exists.
+6. Confirm views and tables with no available safe identity are browse-only.
+7. Apply table creation, table rename, column add/rename/drop, and table drop.
+8. Reject a malicious type declaration without changing the database schema.
+9. Start and commit a transaction; start and roll back a transaction; inspect `is_autocommit` state.
+10. Load a generated column and verify it is visible but not writable; verify hidden virtual-table columns are not exposed as editable fields.
+11. Cause a constraint failure inside a mutation savepoint and verify the outer transaction remains usable and earlier pending writes remain pending.
+12. Verify read-only mode blocks row and schema writes as well as ordinary SQL writes.
+13. Verify a connection cannot be replaced while an explicit transaction is active.
 
-- Empty database and database with no user tables.
-- Tables with composite primary keys, generated columns, `WITHOUT ROWID`, and foreign keys.
-- Views, indexes, triggers, and names containing spaces, quotes, Unicode, and SQL keywords.
-- NULL, all integer/real/text/blob value types, invalid UTF-8 text where SQLite permits it, and very large values.
-- Virtual tables / FTS when enabled in the bundled build.
-- WAL-mode databases, locked databases, read-only file permissions, and corrupt/truncated database files.
-- CSV cells containing delimiters, quotes, CRLF, embedded newlines, and empty/null values.
+## CI gates
 
-## 4. Database correctness tests
+Every pull request should pass:
 
-- Assert that identifiers are escaped rather than interpolated raw.
-- Assert pagination values are bound parameters and page boundaries do not duplicate rows.
-- Assert row and text limits are visible in result metadata and UI copy.
-- Assert query errors do not replace the previous successful result unexpectedly.
-- Assert read-only connections reject normal write statements.
-- Assert a failed write transaction rolls back all prior statements in that transaction.
-- Assert exports are byte-for-byte valid for RFC 4180-sensitive content and clearly identify partial materialization.
+```bash
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+```
 
-## 5. Performance tests
+Release branches additionally run `cargo build --release` on Windows, macOS, and Linux, dependency/license audit, and manual GUI smoke tests using temporary database copies. The CI workflow currently builds the native app matrix and runs formatting, Clippy, and tests on Linux; ensure the lockfile is committed and matrix test coverage is expanded before a 1.0 release.
 
-Use generated fixtures at 10k, 100k, and 1m rows, plus wide tables and large text/BLOB columns. Track:
+## Manual 0.2 GUI smoke test
 
-- cold startup time and time to first interactive frame;
-- schema discovery time;
-- first-page and deep-page browse time;
-- query first-row and full-preview latency;
-- peak resident memory and number of display cells;
-- cancellation latency and UI frame latency during active database work.
-
-Do not accept a benchmark improvement that weakens correctness, type fidelity, or data-safety guarantees. Store benchmark hardware, OS, SQLite build, dataset generator seed, and commit SHA with every result.
-
-## 6. CI gates
-
-Pull requests should run formatting, Clippy with warnings denied, unit/integration tests, and a platform compile matrix. The 1.0 pipeline should additionally run dependency vulnerability and license checks, an SBOM generator, selected fuzz targets, and reproducible release-package checks.
-
-## 7. Current baseline
-
-The prototype includes unit tests for opening the demo database, basic query mapping, schema/table metadata, identifier quoting, read-only mutation rejection, and CSV quoting. In the generation environment, the Rust toolchain was unavailable, so these tests have not been executed here. The demo SQL fixture itself was executed using Python's SQLite driver and passed schema/data/integrity smoke checks; this does not validate Rust compilation.
+1. Launch the app and load the demo database.
+2. Insert a customer with NULL in one nullable field; verify NULL differs from empty text.
+3. Edit one field and verify untouched fields remain unchanged.
+4. Insert a text value containing quotes and SQL comment characters; verify it remains literal data.
+5. Delete a row, cancel the first dialog, then repeat and confirm with `DELETE`.
+6. Begin an IMMEDIATE transaction, insert a row, and roll back with typed confirmation; verify the row is absent.
+7. Begin a DEFERRED transaction, insert, commit, and verify persistence.
+8. Create a table with a composite primary key, insert and edit a row, and verify targeting.
+9. Add/rename/drop a column and rename/drop a disposable table, testing cancellation of the destructive dialogs.
+10. Open a copy read-only; verify guided writes and transaction start are disabled, SQL writes are rejected, and a manually started read transaction can be ended.
+11. Open the SQL Workbench and verify one valid statement, one syntax error, and an explicit SQL transaction are reflected in the status/header.
+12. Run `PRAGMA integrity_check` and expect `ok` on the test database.
